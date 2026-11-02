@@ -1,0 +1,64 @@
+name: Deploy live master
+
+# Pull-based: downloads the site bundle that the main repository's CI attaches
+# to its rolling `live` pre-release after every green build of master,
+# verifies it, adds the live banner and deploys it to GitHub Pages.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.latest.outputs.revision }}
+      deployed: ${{ steps.deployed.outputs.revision }}
+    steps:
+      - id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download live -R arcaverborum/arcaverborum -p LIVE_REVISION; then
+            echo "revision=$(cat LIVE_REVISION)" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No live pre-release is visible yet; nothing to deploy."
+          fi
+      - id: deployed
+        run: echo "revision=$(curl -fsS https://live.arcaverborum.org/REVISION 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: check
+    if: needs.check.outputs.revision != '' && (github.event_name == 'workflow_dispatch' || needs.check.outputs.revision != needs.check.outputs.deployed)
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download and verify the live site bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download live -R arcaverborum/arcaverborum -p arcaverborum-live-site.tar.gz -p SHA256SUMS -p LIVE_REVISION
+          grep " arcaverborum-live-site.tar.gz\$" SHA256SUMS | sha256sum -c -
+          mkdir _site && tar -xzf arcaverborum-live-site.tar.gz -C _site
+          test -f _site/index.html && test -f _site/data/manifest.json
+          cp LIVE_REVISION _site/REVISION
+          echo "live.arcaverborum.org" > _site/CNAME
+          touch _site/.nojekyll
+          size=$(du -sm _site | cut -f1); [ "$size" -lt 900 ] || { echo "::error::site is ${size} MB, above the 900 MB headroom"; exit 1; }
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
